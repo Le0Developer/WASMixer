@@ -10,11 +10,10 @@ setup(
     install_requires=[
         "setuptools==68.0.0",
         "sphinx-tabs==3.4.1",
-        "cyleb128==0.1.3",
         "BREWasm==1.0.8",
-        "numpy~=1.25.2"
+        "numpy>=1.25.2"
     ],
-    python_requires='>=3.7',
+    python_requires='>=3.9',
     include_package_data=True,
     entry_points={},
     classifiers=[

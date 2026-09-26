@@ -1,16 +1,11 @@
 # WASMixer (CLI)
 ## Install dependencies
-**Requirements** 
-- Python `<= 3.10` (due to [cyleb](https://github.com/mosquito/cyleb128/blob/master/setup.py))
-    - via Pyenv
-        ```sh
-        pyenv install 3.10
-        pyenv local 3.10
-        ```
+**Requirements**
+- Python `>= 3.9`
 **Install**
 ```bash
 cd WASMixer #root of repository
-python install -e .
+python -m pip install -e .
 ```
 ## Usage
 ```sh
@@ -59,5 +54,4 @@ python main.py mybinary.wasm --all --safe
 - Make sure WASMixer is installed in editable mode and all dependencies are satisfied.
 
 For more details, see the docstrings in `main.py`.
-
 
