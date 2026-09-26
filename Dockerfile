@@ -30,8 +30,7 @@ RUN apt-get update \
     sudo git\
   && apt-get clean \
   && python3 -m pip install --upgrade pip \
-  && pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-  && pip install setuptools sphinx-tabs BREWasm numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
+  && python3 -m pip install setuptools sphinx-tabs BREWasm numpy
 
 # set bash as default shell
 SHELL ["/bin/bash", "-c"]
