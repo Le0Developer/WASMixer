@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# start SSH service
-sudo service ssh start
-# bash
-exec /bin/bash
+# Start SSH when the container is used for remote access.
+ssh-keygen -A
+mkdir -p /run/sshd
+/usr/sbin/sshd
 
-# 启动容器
+exec /bin/bash
 # docker run -it wasmaker

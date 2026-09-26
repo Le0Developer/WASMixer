@@ -8,7 +8,7 @@ WASMixer consists of two main functions: the data obfuscator and the code obfusc
 
 1.   set environment
 
-WASMixer should run well on a server with Ubuntu 22.04.
+The Docker image is based on Alpine Linux 3.24.
 Please download [Docker](https://docs.docker.com/get-docker/) first.
 ```bash
 sudo docker build -t wasmixer .
