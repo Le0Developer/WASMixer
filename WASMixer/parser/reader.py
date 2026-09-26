@@ -143,11 +143,11 @@ class WasmReader:
         if module.magic != MagicNumber:
             raise Exception("magic header not detected")
         if self.remaining() < 4:
-            raise Exception("unexpected end of WASMaker version")
+            raise Exception("unexpected end of WASMixer version")
 
         module.version = self.read_u32()
         if module.version != Version:
-            raise Exception("unknown WASMaker version: %d" % module.version)
+            raise Exception("unknown WASMixer version: %d" % module.version)
 
         self.read_sections(module)
         if len(module.func_sec) != len(module.code_sec):
