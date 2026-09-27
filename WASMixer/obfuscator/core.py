@@ -344,6 +344,9 @@ class CodeObfuscator:
             # Recursive call
             elif instr.opcode in [Block, Loop]:
                 self.call_to_indirect_call(instr.args.instrs)
+            elif instr.opcode == If:
+                self.call_to_indirect_call(instr.args.instrs1)
+                self.call_to_indirect_call(instr.args.instrs2)
 
     def alias_disruption_collatz(self, Collatz_func_id):
         if self.wasm_binary.module.table_sec_opaque:
