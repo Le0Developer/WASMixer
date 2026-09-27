@@ -430,68 +430,259 @@ class CodeObfuscator:
         return table_index
 
     def memory_encrypten_obfuscation(self, key=None):
+        module = self.wasm_binary.module
+        if key is None:
+            key = random.randint(1, 255)
+        if not isinstance(key, int) or not 0 < key < 256:
+            raise ValueError("memory obfuscation key must be an integer from 1 to 255")
 
-        if self.wasm_binary.module.data_sec == [] or self.wasm_binary.module.data_sec_opaque:
+        # This representation stores every memory byte XORed with one byte.
+        # Keep the transform conservative where host-visible memory or memory
+        # operations outside the scalar/vector accesses below could observe or
+        # modify the encoded representation directly.
+        imported_memories = sum(1 for item in module.import_sec if item.desc.mem is not None)
+        exported_memories = any(item.desc.tag == ExportTagMem for item in module.export_sec)
+        if (imported_memories or exported_memories or len(module.mem_sec) != 1
+                or module.mem_sec[0].tag & 0x06 or module.data_sec_opaque):
             return
 
-        if key is None:
-            key = random.randint(1, 128)
+        def walk(instrs):
+            for instr in instrs:
+                yield instr
+                if instr.opcode in [Block, Loop]:
+                    yield from walk(instr.args.instrs)
+                elif instr.opcode == If:
+                    yield from walk(instr.args.instrs1)
+                    yield from walk(instr.args.instrs2)
 
-        segments = []
-        for data in self.wasm_binary.module.data_sec:
+        all_instructions = []
+        for code in module.code_sec:
+            if code.raw_body is not None:
+                return
+            all_instructions.extend(walk(code.expr))
+
+        # memory.grow creates zero-filled bytes, while passive data and most
+        # SIMD memory operators need their own encoding rules. Do not emit a
+        # partially correct transform for those modules.
+        unsupported_memory_ops = {MemoryGrow, MemoryInit}
+        if any(instr.opcode in unsupported_memory_ops for instr in all_instructions):
+            return
+        if any(
+            (V128Load <= instr.opcode <= V128Store
+             and instr.opcode not in [V128Load, V128Store])
+            or 0xFD54 <= instr.opcode <= 0xFD5D
+            for instr in all_instructions
+        ):
+            return
+        if not any(
+            I32Load <= instr.opcode <= I64Store32
+            or instr.opcode in [V128Load, V128Store]
+            for instr in all_instructions
+        ):
+            return
+
+        memory_bytes = module.mem_sec[0].min * 65536
+        if memory_bytes > 0xFFFFFFFF:
+            return
+        data_ranges = []
+        for data in module.data_sec:
             if data.mem != 0 or len(data.offset) != 1 or data.offset[0].opcode != I32Const:
                 return
-            start = data.offset[0].args
-            if start < 0 or start + len(data.init) > 0x7FFFFFFF:
+            start = data.offset[0].args & 0xFFFFFFFF
+            end = start + len(data.init)
+            if end > memory_bytes:
                 return
-            segments.append((start, data.init))
+            data_ranges.append((start, end))
 
-        # Encrypt each active data segment in the file. A tiny start function
-        # decrypts it after data initialization and before the module's own
-        # start function, leaving normal loads and stores untouched at runtime.
-        for _, memory_data in segments:
-            for index, byte in enumerate(memory_data):
-                memory_data[index] = byte ^ key
+        # Data segments are installed before the start function runs, so keep
+        # their bytes encoded in the binary and initialize only the untouched
+        # gaps to encoded zero. A constant byte key makes scalar width changes
+        # and unaligned accesses use the same byte mask.
+        for data in module.data_sec:
+            data.init = bytes(byte ^ key for byte in data.init)
 
-        decrypt_expr = []
-        for start, memory_data in segments:
-            end = start + len(memory_data)
-            decrypt_expr.extend([
-                Instruction(I32Const, start),
-                Instruction(LocalSet, 0),
-                Instruction(Block, BlockArgs(BlockTypeEmpty, [
-                    Instruction(Loop, BlockArgs(BlockTypeEmpty, [
-                        Instruction(LocalGet, 0),
-                        Instruction(I32Const, end),
-                        Instruction(I32GeU),
-                        Instruction(BrIf, 1),
-                        Instruction(LocalGet, 0),
-                        Instruction(LocalGet, 0),
-                        Instruction(I32Load8U, MemArg()),
-                        Instruction(I32Const, key),
-                        Instruction(I32Xor),
-                        Instruction(I32Store8, MemArg()),
-                        Instruction(LocalGet, 0),
-                        Instruction(I32Const, 1),
-                        Instruction(I32Add),
-                        Instruction(LocalSet, 0),
-                        Instruction(Br, 0),
-                    ])),
-                ])),
+        merged_ranges = []
+        for start, end in sorted(data_ranges):
+            if start == end:
+                continue
+            if merged_ranges and start <= merged_ranges[-1][1]:
+                merged_ranges[-1] = (merged_ranges[-1][0], max(end, merged_ranges[-1][1]))
+            else:
+                merged_ranges.append((start, end))
+
+        initialization = []
+        cursor = 0
+        for start, end in merged_ranges:
+            if cursor < start:
+                initialization.extend([
+                    Instruction(I32Const, cursor), Instruction(I32Const, 0),
+                    Instruction(I32Const, start - cursor), Instruction(MemoryFill, 0),
+                ])
+            cursor = max(cursor, end)
+        if cursor < memory_bytes:
+            initialization.extend([
+                Instruction(I32Const, cursor), Instruction(I32Const, 0),
+                Instruction(I32Const, memory_bytes - cursor), Instruction(MemoryFill, 0),
             ])
 
-        if self.wasm_binary.module.start_sec is not None:
-            decrypt_expr.append(Instruction(Call, self.wasm_binary.module.start_sec))
+        import_func_count = self.wasm_binary.get_import_func_num()
+        start_func = module.start_sec
+        if initialization:
+            if start_func is not None and start_func >= import_func_count:
+                module.code_sec[start_func - import_func_count].expr[0:0] = initialization
+            else:
+                start_expr = initialization[:]
+                if start_func is not None:
+                    start_expr.append(Instruction(Call, start_func))
+                start_func = self.wasm_binary.add_function(
+                    FuncType(param_types=[], result_types=[]), [], start_expr
+                )
+                module.start_sec = start_func
 
-        decrypt_type = FuncType(param_types=[], result_types=[])
-        decrypt_func_id = self.wasm_binary.add_function(
-            decrypt_type,
-            [Locals(1, ValTypeI32)],
-            decrypt_expr,
-        )
-        self.wasm_binary.module.start_sec = decrypt_func_id
-        self.wasm_binary.modify_start_section(decrypt_func_id)
-        self.wasm_binary.emit_binary()
+        i32_stores = {I32Store, I32Store8, I32Store16}
+        i64_stores = {I64Store, I64Store8, I64Store16, I64Store32}
+        f32_stores = {F32Store}
+        f64_stores = {F64Store}
+        i32_key = sum(key << (8 * byte) for byte in range(4))
+        i64_key = sum(key << (8 * byte) for byte in range(8))
+        v128_key = sum(key << (8 * byte) for byte in range(16))
+        i32_key_signed = i32_key if i32_key < 0x80000000 else i32_key - 0x100000000
+        i64_key_signed = i64_key if i64_key < 0x8000000000000000 else i64_key - 0x10000000000000000
+
+        load_masks = {
+            I32Load: (i32_key_signed, I32Xor, None),
+            I32Load8S: (key, I32Xor, I32Extend8S),
+            I32Load8U: (key, I32Xor, None),
+            I32Load16S: (key * 0x0101, I32Xor, I32Extend16S),
+            I32Load16U: (key * 0x0101, I32Xor, None),
+            I64Load: (i64_key_signed, I64Xor, None),
+            I64Load8S: (key, I64Xor, I64Extend8S),
+            I64Load8U: (key, I64Xor, None),
+            I64Load16S: (key * 0x0101, I64Xor, I64Extend16S),
+            I64Load16U: (key * 0x0101, I64Xor, None),
+            I64Load32S: (i32_key, I64Xor, I64Extend32S),
+            I64Load32U: (i32_key, I64Xor, None),
+        }
+        store_masks = {
+            I32Store: (i32_key_signed, I32Xor, None, None),
+            I32Store8: (key, I32Xor, None, None),
+            I32Store16: (key * 0x0101, I32Xor, None, None),
+            I64Store: (i64_key_signed, I64Xor, None, None),
+            I64Store8: (key, I64Xor, None, None),
+            I64Store16: (key * 0x0101, I64Xor, None, None),
+            I64Store32: (i32_key, I64Xor, None, None),
+            F32Store: (i32_key_signed, I32Xor, None, I32ReinterpretF32),
+            F64Store: (i64_key_signed, I64Xor, None, I64ReinterpretF64),
+        }
+
+        def rewrite(instrs, locals_by_type):
+            rewritten = []
+            for instr in instrs:
+                if instr.opcode in [Block, Loop]:
+                    instr.args.instrs = rewrite(instr.args.instrs, locals_by_type)
+                elif instr.opcode == If:
+                    instr.args.instrs1 = rewrite(instr.args.instrs1, locals_by_type)
+                    instr.args.instrs2 = rewrite(instr.args.instrs2, locals_by_type)
+
+                if instr.opcode in load_masks:
+                    mask, xor_opcode, sign_extend = load_masks[instr.opcode]
+                    # Signed narrow loads must sign-extend after decrypting the
+                    # original byte(s), since ciphertext's sign bit differs.
+                    load_opcode = instr.opcode
+                    if instr.opcode == I32Load8S:
+                        load_opcode = I32Load8U
+                    elif instr.opcode == I32Load16S:
+                        load_opcode = I32Load16U
+                    elif instr.opcode == I64Load8S:
+                        load_opcode = I64Load8U
+                    elif instr.opcode == I64Load16S:
+                        load_opcode = I64Load16U
+                    elif instr.opcode == I64Load32S:
+                        load_opcode = I64Load32U
+                    rewritten.append(Instruction(load_opcode, instr.args))
+                    rewritten.extend([
+                        Instruction(I32Const if xor_opcode == I32Xor else I64Const, mask),
+                        Instruction(xor_opcode),
+                    ])
+                    if sign_extend is not None:
+                        rewritten.append(Instruction(sign_extend))
+                elif instr.opcode in [F32Load, F64Load]:
+                    rewritten.append(instr)
+                    if instr.opcode == F32Load:
+                        rewritten.extend([
+                            Instruction(I32ReinterpretF32), Instruction(I32Const, i32_key_signed),
+                            Instruction(I32Xor), Instruction(F32ReinterpretI32),
+                        ])
+                    else:
+                        rewritten.extend([
+                            Instruction(I64ReinterpretF64), Instruction(I64Const, i64_key_signed),
+                            Instruction(I64Xor), Instruction(F64ReinterpretI64),
+                        ])
+                elif instr.opcode in store_masks:
+                    mask, xor_opcode, _, reinterpret = store_masks[instr.opcode]
+                    local_idx = locals_by_type[instr.opcode]
+                    rewritten.append(Instruction(LocalSet, local_idx))
+                    rewritten.append(Instruction(LocalGet, local_idx))
+                    if reinterpret is not None:
+                        rewritten.append(Instruction(reinterpret))
+                    rewritten.append(Instruction(I32Const if xor_opcode == I32Xor else I64Const, mask))
+                    rewritten.append(Instruction(xor_opcode))
+                    if instr.opcode == F32Store:
+                        rewritten.append(Instruction(F32ReinterpretI32))
+                    elif instr.opcode == F64Store:
+                        rewritten.append(Instruction(F64ReinterpretI64))
+                    rewritten.append(instr)
+                elif instr.opcode == V128Load:
+                    rewritten.extend([
+                        instr, Instruction(V128Const, v128_key), Instruction(V128Xor),
+                    ])
+                elif instr.opcode == V128Store:
+                    local_idx = locals_by_type[V128Store]
+                    rewritten.extend([
+                        Instruction(LocalSet, local_idx),
+                        Instruction(LocalGet, local_idx),
+                        Instruction(V128Const, v128_key), Instruction(V128Xor), instr,
+                    ])
+                elif instr.opcode == MemoryFill:
+                    dest_local, value_local, length_local = locals_by_type[MemoryFill]
+                    rewritten.extend([
+                        Instruction(LocalSet, length_local),
+                        Instruction(LocalSet, value_local),
+                        Instruction(LocalSet, dest_local),
+                        Instruction(LocalGet, dest_local),
+                        Instruction(LocalGet, value_local), Instruction(I32Const, key),
+                        Instruction(I32Xor),
+                        Instruction(LocalGet, length_local), instr,
+                    ])
+                else:
+                    rewritten.append(instr)
+            return rewritten
+
+        for func_id, code in enumerate(module.code_sec):
+            func_instrs = list(walk(code.expr))
+            locals_by_type = {}
+            for opcodes, local_type in [
+                (i32_stores, ValTypeI32), (i64_stores, ValTypeI64),
+                (f32_stores, ValTypeF32), (f64_stores, ValTypeF64),
+            ]:
+                if any(instr.opcode in opcodes for instr in func_instrs):
+                    local_indices = {
+                        I32Store: ValTypeI32, I32Store8: ValTypeI32, I32Store16: ValTypeI32,
+                        I64Store: ValTypeI64, I64Store8: ValTypeI64, I64Store16: ValTypeI64,
+                        I64Store32: ValTypeI64, F32Store: ValTypeF32, F64Store: ValTypeF64,
+                    }
+                    local_idx = self.wasm_binary.add_new_local_to_func(func_id, local_type)
+                    for opcode in opcodes:
+                        if opcode in local_indices:
+                            locals_by_type[opcode] = local_idx
+            if any(instr.opcode == V128Store for instr in func_instrs):
+                locals_by_type[V128Store] = self.wasm_binary.add_new_local_to_func(func_id, ValTypeV128)
+            if any(instr.opcode == MemoryFill for instr in func_instrs):
+                locals_by_type[MemoryFill] = [
+                    self.wasm_binary.add_new_local_to_func(func_id, ValTypeI32)
+                    for _ in range(3)
+                ]
+            code.expr = rewrite(code.expr, locals_by_type)
 
     def hook_load_store_instr(self, instrs, decrypten_load_funcid, encrypten_store_funcid):
         for _, i in enumerate(instrs):
