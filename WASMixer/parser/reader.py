@@ -2,12 +2,12 @@ import ctypes
 from io import BytesIO
 import struct
 
-from ..parser.instruction import Instruction, BlockArgs, IfArgs, BrTableArgs, MemArg, TableArg, MemLaneArg
+from ..parser.instruction import Instruction, BlockArgs, IfArgs, BrTableArgs, MemArg, TableArg, MemLaneArg, CallIndirectArgs
 from ..parser.leb128 import *
 from ..parser.module import Import, ImportDesc, ImportTagFunc, ImportTagTable, ImportTagMem, ImportTagGlobal, \
     Global, Export, ExportDesc, ExportTagFunc, ExportTagTable, ExportTagMem, ExportTagGlobal, Elem, Code, Locals, \
     Data, MagicNumber, Version, Module, SecCustomID, SecDataID, CustomSec, SecTypeID, SecImportID, SecFuncID, \
-    SecTableID, SecMemID, SecGlobalID, SecExportID, SecStartID, SecElemID, SecCodeID, SecDataCountID, \
+    SecTableID, SecMemID, SecGlobalID, SecExportID, SecStartID, SecElemID, SecCodeID, SecDataCountID, SecTagID, \
     NameData, SectionRange
 from ..parser.opcodes import *
 from ..parser.opnames import opnames
@@ -178,12 +178,15 @@ class WasmReader:
                     module.custom_secs.append(CustomSec())
                     continue
 
-            if sec_id not in range(SecTypeID, SecDataID + 1) and sec_id != SecDataCountID:
+            if sec_id not in range(SecTypeID, SecDataID + 1) and sec_id not in [SecDataCountID, SecTagID]:
                 raise Exception("malformed section id: %d" % sec_id)
 
             # DataCount (id 12) is ordered between Element (id 9) and Code
             # (id 10), so numeric section ids are not their binary order.
-            sec_rank = {SecDataCountID: 10, SecCodeID: 11, SecDataID: 12}.get(sec_id, sec_id)
+            sec_rank = {
+                6: 7, 7: 8, 8: 9, 9: 10,
+                SecDataCountID: 11, SecCodeID: 12, SecDataID: 13, SecTagID: 6,
+            }.get(sec_id, sec_id)
             if sec_rank <= prev_sec_rank:
                 raise Exception("malformed section id: %d" % sec_id)
             prev_sec_rank = sec_rank
@@ -192,23 +195,39 @@ class WasmReader:
             remaining_before_read = self.remaining()
             section_start = self.reader.tell() - w - 1
             section_end = self.reader.tell() + n
+            if sec_id == SecTagID:
+                module.raw_tag_section = self.data[section_start:section_end]
+                module.section_range[SecTagID].start = section_start
+                module.section_range[SecTagID].end = section_end
+                self.reader.seek(section_end)
+                continue
             try:
                 self.read_non_custom_sec(sec_id, module, n, w)
             except Exception:
-                if sec_id != SecElemID:
+                if sec_id not in [SecTableID, SecElemID, SecDataID]:
                     raise
-                # Preserve unsupported reference-types element encodings.
-                # The current transforms append functions and do not renumber
-                # function references already stored in these segments.
-                module.elem_sec = []
-                module.elem_sec_opaque = True
-                module.raw_elem_section = self.data[section_start:section_end]
-                content_start = section_start + 1 + w
-                module.raw_elem_count, count_width = decode_var_uint_from_data(
-                    self.data[content_start:section_end], 32
-                )
-                entries_start = content_start + count_width
-                module.raw_elem_entries = self.data[entries_start:section_end]
+                # Preserve proposal encodings that the current model cannot
+                # rewrite safely. Transforms append their own element segment
+                # and do not renumber existing function references. Opaque
+                # data sections are left intact and skip memory encryption.
+                if sec_id == SecTableID:
+                    module.table_sec = []
+                    module.table_sec_opaque = True
+                    module.raw_table_section = self.data[section_start:section_end]
+                elif sec_id == SecElemID:
+                    module.elem_sec = []
+                    module.elem_sec_opaque = True
+                    module.raw_elem_section = self.data[section_start:section_end]
+                    content_start = section_start + 1 + w
+                    module.raw_elem_count, count_width = decode_var_uint_from_data(
+                        self.data[content_start:section_end], 32
+                    )
+                    entries_start = content_start + count_width
+                    module.raw_elem_entries = self.data[entries_start:section_end]
+                else:
+                    module.data_sec = []
+                    module.data_sec_opaque = True
+                    module.raw_data_section = self.data[section_start:section_end]
                 self.reader.seek(section_end)
 
             remain = self.remaining()
@@ -216,14 +235,16 @@ class WasmReader:
                 raise Exception("section size mismatch, id: %d" % sec_id)
 
     def read_custom_sec(self, sec_size):
+        section_data_start = self.reader.tell()
         name = self.read_name()
+        name_end = self.reader.tell()
 
         if name != "name":
-            self.reader.seek(self.reader.tell() - len(name) - 1)
+            self.reader.seek(section_data_start)
             custom_sec_data = self.reader.read(sec_size)
             return CustomSec(name=name, custom_sec_data=custom_sec_data), name
 
-        name_data = self.read_name_data(self.reader.read(sec_size - len(name) - 1))
+        name_data = self.read_name_data(self.reader.read(sec_size - (name_end - section_data_start)))
         return CustomSec(name=name, name_data=name_data), name
 
     @staticmethod
@@ -523,7 +544,14 @@ class WasmReader:
         return vec
 
     def read_elem(self):
-        return Elem(self.read_var_u32(), self.read_expr(), self.read_indices())
+        # The legacy active funcref segment (flags=0) is the only encoding
+        # represented by Elem. Preserve every bulk-memory/reference-types
+        # segment as raw section data through read_sections' fallback instead
+        # of accidentally treating its flags as a table index.
+        flags = self.read_var_u32()
+        if flags != 0:
+            raise Exception("unsupported element segment encoding: %d" % flags)
+        return Elem(0, self.read_expr(), self.read_indices())
 
     def read_code_sec(self):
 
@@ -574,7 +602,13 @@ class WasmReader:
         return vec
 
     def read_data(self):
-        return Data(self.read_var_u32(), self.read_expr(), self.read_bytes())
+        # The current data model represents only an active segment targeting
+        # memory 0. Keep passive and explicit-memory segments opaque so bulk
+        # memory modules survive unrelated transforms byte-for-byte.
+        flags = self.read_var_u32()
+        if flags != 0:
+            raise Exception("unsupported data segment encoding: %d" % flags)
+        return Data(0, self.read_expr(), self.read_bytes())
 
     def read_val_types(self):
         vec = []
@@ -701,12 +735,12 @@ class WasmReader:
             return self.read_lane()
         elif opcode in [RefNull, RefFunc]:
             return self.read_var_u32()
-        elif opcode in [MemoryInit, DataDrop, ElemDrop, TableGrow, TableSize, TableFill]:
-            return self.read_var_u32()
-        elif opcode in [TableInit, TableCopy]:
+        elif opcode in [MemoryInit, MemoryCopy, TableInit, TableCopy]:
             x = self.read_var_u32()
             y = self.read_var_u32()
             return TableArg(x, y)
+        elif opcode in [DataDrop, ElemDrop, MemoryFill, TableGrow, TableSize, TableFill]:
+            return self.read_var_u32()
         elif V128Load <= opcode <= V128Store or opcode in [V128Load32Zero, V128Load64Zero]:
             return self.read_mem_arg()
         elif V128Load8Lane <= opcode <= V128Store64Lane:
@@ -745,8 +779,8 @@ class WasmReader:
     def read_call_indirect_args(self):
 
         type_idx = self.read_var_u32()
-        self.read_zero()
-        return type_idx
+        table_idx = self.read_var_u32()
+        return CallIndirectArgs(type_idx, table_idx)
 
     def read_mem_arg(self):
 

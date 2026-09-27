@@ -103,10 +103,11 @@ def call(interpreter, args, stack):
 
 
 def call_indirect(interpreter, args, stack):
+    type_idx = args.type_idx if hasattr(args, "type_idx") else args
     stack.pop()
-    for param_type in interpreter.wasm_binary.module.type_sec[args].param_types:
+    for param_type in interpreter.wasm_binary.module.type_sec[type_idx].param_types:
         stack.pop()
-    for result_type in interpreter.wasm_binary.module.type_sec[args].result_types:
+    for result_type in interpreter.wasm_binary.module.type_sec[type_idx].result_types:
         stack.append(result_type)
 
 

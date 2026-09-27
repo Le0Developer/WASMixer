@@ -1,5 +1,5 @@
 from WASMixer.obfuscator.utils import *
-from WASMixer.parser.types import FuncType
+from WASMixer.parser.types import FuncRef, FuncType, Limits, TableType
 from typing import Optional, Union, Any
 
 
@@ -265,17 +265,15 @@ class CodeObfuscator:
             return final_instrs
 
     def alias_disruption(self):
-        # An imported table belongs to the embedding. Rewriting its minimum
-        # or replacing entries would change the host-side table contract.
-        if any(item.desc.table is not None for item in self.wasm_binary.module.import_sec):
+        if self.wasm_binary.module.table_sec_opaque:
             return
 
         func_ids = list(range(
             self.wasm_binary.get_import_func_num() + len(self.wasm_binary.module.func_sec)
         ))
-        table_base = add_table_funcref_limits(self.wasm_binary, len(func_ids))
+        alias_table = self._append_alias_table(len(func_ids))
         random.shuffle(func_ids)
-        alias_elem = Elem(0, [Instruction(I32Const, table_base)], func_ids)
+        alias_elem = Elem(alias_table, [Instruction(I32Const, 0)], func_ids)
         self.wasm_binary.module.elem_sec.append(alias_elem)
         self.alias_elem = alias_elem
 
@@ -307,7 +305,9 @@ class CodeObfuscator:
                 func_type_id = norm
 
                 # Build call_indirect instruction
-                expr[_] = Instruction(CallIndirect, func_type_id)
+                expr[_] = Instruction(
+                    CallIndirect, CallIndirectArgs(func_type_id, self.alias_elem.table)
+                )
                 # Get the index of this function in funcref
                 funcref_id = self.alias_elem.init.index(func_id) + self.alias_elem.offset[0].args
                 # Push the funcref index on the stack
@@ -318,15 +318,15 @@ class CodeObfuscator:
                 self.call_to_indirect_call(instr.args.instrs)
 
     def alias_disruption_collatz(self, Collatz_func_id):
-        if any(item.desc.table is not None for item in self.wasm_binary.module.import_sec):
+        if self.wasm_binary.module.table_sec_opaque:
             return
 
         func_ids = list(range(
             self.wasm_binary.get_import_func_num() + len(self.wasm_binary.module.func_sec)
         ))
-        table_base = add_table_funcref_limits(self.wasm_binary, len(func_ids))
+        alias_table = self._append_alias_table(len(func_ids))
         random.shuffle(func_ids)
-        alias_elem = Elem(0, [Instruction(I32Const, table_base)], func_ids)
+        alias_elem = Elem(alias_table, [Instruction(I32Const, 0)], func_ids)
         self.wasm_binary.module.elem_sec.append(alias_elem)
         self.alias_elem = alias_elem
 
@@ -359,7 +359,9 @@ class CodeObfuscator:
                 func_type_id = norm
 
                 # Build call_indirect instruction
-                expr[_] = Instruction(CallIndirect, func_type_id)
+                expr[_] = Instruction(
+                    CallIndirect, CallIndirectArgs(func_type_id, self.alias_elem.table)
+                )
                 # Get the index of this function in funcref
                 funcref_id = self.alias_elem.init.index(func_id) + self.alias_elem.offset[0].args
                 # Keep the original call arguments on the stack, run the
@@ -386,9 +388,19 @@ class CodeObfuscator:
             else:
                 _ += 1
 
+    def _append_alias_table(self, size):
+        imported_tables = sum(
+            1 for item in self.wasm_binary.module.import_sec if item.desc.table is not None
+        )
+        table_index = imported_tables + len(self.wasm_binary.module.table_sec)
+        self.wasm_binary.module.table_sec.append(
+            TableType(elem_type=FuncRef, limits=Limits(0, size, 0))
+        )
+        return table_index
+
     def memory_encrypten_obfuscation(self, key=None):
 
-        if self.wasm_binary.module.data_sec == []:
+        if self.wasm_binary.module.data_sec == [] or self.wasm_binary.module.data_sec_opaque:
             return
 
         if key is None:
@@ -397,10 +409,10 @@ class CodeObfuscator:
         segments = []
         for data in self.wasm_binary.module.data_sec:
             if data.mem != 0 or len(data.offset) != 1 or data.offset[0].opcode != I32Const:
-                raise ValueError("memory obfuscation supports active data segments in memory 0")
+                return
             start = data.offset[0].args
             if start < 0 or start + len(data.init) > 0x7FFFFFFF:
-                raise ValueError("data segment address is outside the supported memory range")
+                return
             segments.append((start, data.init))
 
         # Encrypt each active data segment in the file. A tiny start function

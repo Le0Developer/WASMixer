@@ -1,0 +1,103 @@
+diff --git a/tests/compiler.js b/tests/compiler.js
+index 0b6018f..083e9e1 100644
+--- a/tests/compiler.js
++++ b/tests/compiler.js
+@@ -5,2 +5,3 @@ import v8 from "v8";
+ import cluster from "cluster";
++import { execFileSync } from "child_process";
+ import { createRequire } from "module";
+@@ -435,1 +436,67 @@ async function runTest(basename) {
++let wasmixerTestIndex = 0;
++
++function mixWithWASMixer(binaryBuffer) {
++  const root = process.env.WASMIXER_ROOT;
++  if (!root) return null;
++
++  const originalModule = new WebAssembly.Module(binaryBuffer);
++  const originalImports = WebAssembly.Module.imports(originalModule);
++  const originalExports = WebAssembly.Module.exports(originalModule);
++  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wasmixer-as-test-"));
++  const wasmPath = path.join(tempDir, `${process.pid}-${wasmixerTestIndex++}.wasm`);
++  try {
++    fs.writeFileSync(wasmPath, binaryBuffer);
++    execFileSync("python3", [path.join(root, "cli/main.py"), wasmPath,
++      ...(process.env.WASMIXER_OPTIONS || "--all").split(" ")], {
++      cwd: root,
++      env: { ...process.env, PYTHONPATH: root },
++      stdio: "pipe"
++    });
++    const mixedBuffer = fs.readFileSync(wasmPath);
++    const mixedModule = new WebAssembly.Module(mixedBuffer);
++    const mixedImports = WebAssembly.Module.imports(mixedModule);
++    const mixedExports = WebAssembly.Module.exports(mixedModule);
++    if (originalImports.length !== mixedImports.length || originalExports.length !== mixedExports.length) {
++      throw new Error("WASMixer changed the number of imports or exports");
++    }
++    return { buffer: mixedBuffer, originalImports, mixedImports, originalExports, mixedExports };
++  } finally {
++    fs.rmSync(tempDir, { recursive: true, force: true });
++  }
++}
++
++function aliasImportNames(imports, originalImports, mixedImports) {
++  for (let i = 0; i < originalImports.length; ++i) {
++    const original = originalImports[i];
++    const mixed = mixedImports[i];
++    if (original.module === mixed.module && original.name === mixed.name) continue;
++    const originalModule = imports[original.module];
++    const importValue = originalModule && original.name in originalModule
++      ? originalModule[original.name]
++      : original.name.split(".").reduce((value, key) => value?.[key], globalThis);
++    if (typeof importValue === "undefined") {
++      throw new Error(`Missing import ${original.module}.${original.name}; ` +
++        `name=${JSON.stringify(original.name)}, global=${typeof globalThis[original.name]}, ` +
++        `moduleKeys=${Object.keys(imports).join(",")}`);
++    }
++    if (!imports[mixed.module]) imports[mixed.module] = {};
++    imports[mixed.module][mixed.name] = importValue;
++  }
++}
++
++function aliasExportNames(instance, originalExports, mixedExports) {
++  const aliases = new Map(originalExports.map((item, i) => [item.name, mixedExports[i].name]));
++  return new Proxy(instance.exports, {
++    get(target, property, receiver) {
++      if (typeof property === "string" && aliases.has(property)) {
++        return Reflect.get(target, aliases.get(property), target);
++      }
++      return Reflect.get(target, property, receiver);
++    },
++    has(target, property) {
++      return (typeof property === "string" && aliases.has(property)) || Reflect.has(target, property);
++    }
++  });
++}
++
+ // Tests if instantiation of a module succeeds
+@@ -439,2 +506,4 @@ async function testInstantiate(binaryBuffer, glue, stderr) {
+   try {
++    const wasmixer = mixWithWASMixer(binaryBuffer);
++    if (wasmixer) binaryBuffer = wasmixer.buffer;
+     const memory = new WebAssembly.Memory({ initial: 10 });
+@@ -511,4 +580,8 @@ async function testInstantiate(binaryBuffer, glue, stderr) {
+     }
++    if (wasmixer) aliasImportNames(imports, wasmixer.originalImports, wasmixer.mixedImports);
+     const { instance } = await WebAssembly.instantiate(binaryBuffer, imports);
+-    Object.setPrototypeOf(exports, instance.exports);
++    const mappedExports = wasmixer
++      ? aliasExportNames(instance, wasmixer.originalExports, wasmixer.mixedExports)
++      : instance.exports;
++    Object.setPrototypeOf(exports, mappedExports);
+     if (glue.postInstantiate) {
+@@ -516,3 +589,10 @@ async function testInstantiate(binaryBuffer, glue, stderr) {
+       const start = measureStart();
+-      await glue.postInstantiate(instance);
++      const exposedInstance = wasmixer
++        ? new Proxy(instance, {
++          get(target, property) {
++            return property === "exports" ? mappedExports : Reflect.get(target, property, target);
++          }
++        })
++        : instance;
++      await glue.postInstantiate(exposedInstance);
+       console.log("  [return glue.postInstantiate] " + measureEnd(start));

@@ -1,0 +1,89 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assemblyscript:
+    name: AssemblyScript compiler suite with all transforms
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out WASMixer
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install WASMixer
+        run: python -m pip install -e .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Check out AssemblyScript
+        uses: actions/checkout@v6
+        with:
+          repository: AssemblyScript/assemblyscript
+          ref: b6bda05c29c9eb7d07d7f6cb2703508483b30493
+          path: assemblyscript
+
+      - name: Patch the compiler harness to mix each test module
+        working-directory: assemblyscript
+        run: git apply "$GITHUB_WORKSPACE/tests/assemblyscript-mixer.patch"
+
+      - name: Install AssemblyScript dependencies
+        working-directory: assemblyscript
+        run: npm ci
+
+      - name: Run AssemblyScript tests with WASMixer
+        working-directory: assemblyscript
+        env:
+          WASMIXER_ROOT: ${{ github.workspace }}
+          WASMIXER_OPTIONS: --all
+          ASC_FEATURES: threads,reference-types,gc,exception-handling,simd,relaxed-simd
+        run: npm test
+
+  wasm-spec:
+    name: WebAssembly spec suite with all transforms
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out WASMixer
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install WABT and WASMixer
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes wabt
+          python -m pip install -e .
+
+      - name: Set up Wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "49.0.1"
+          github_token: ${{ github.token }}
+
+      - name: Check out the official WebAssembly testsuite
+        uses: actions/checkout@v6
+        with:
+          repository: WebAssembly/testsuite
+          ref: b464a4cd100d98175ae6e3890db89a2e6c8302f7
+          path: wasm-spec-testsuite
+
+      - name: Run AssemblyScript-relevant official tests
+        run: python tests/run_wasm_spec.py wasm-spec-testsuite --runner wasmtime

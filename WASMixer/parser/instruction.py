@@ -79,6 +79,12 @@ class TableArg:
         self.y = y
 
 
+class CallIndirectArgs:
+    def __init__(self, type_idx=0, table_idx=0):
+        self.type_idx = type_idx
+        self.table_idx = table_idx
+
+
 class MemLaneArg:
 
     def __init__(self, mem_arg=None, laneidx=0):

@@ -43,8 +43,9 @@ def get_instrs_max_stack_depth(binary, instr_list):
                         instr.args - binary.get_import_func_num()]].param_types))
 
         elif instr.opcode == CallIndirect:
-            current_stack += (len(binary.module.type_sec[instr.args].result_types) -
-                              len(binary.module.type_sec[instr.args].param_types)) - 1
+            type_idx = instr.args.type_idx if hasattr(instr.args, "type_idx") else instr.args
+            current_stack += (len(binary.module.type_sec[type_idx].result_types) -
+                              len(binary.module.type_sec[type_idx].param_types)) - 1
         else:
             # Proposals can introduce opcodes outside the legacy stack table.
             # Keep those functions valid by leaving them unflattened.
@@ -118,9 +119,14 @@ def code_block_splitting(binary, instr_list, split_num, func_id):
     interpreter = MiniInterpreter(instr_list, binary, func_id)
     stack_snapshot = []
     instr_index = 0
-    for _, instrs in enumerate(instrs_list):
-        instr_index += len(instrs_list[_])
-        stack_snapshot.append(interpreter.get_stack_snapshot(instr_index))
+    try:
+        for _, instrs in enumerate(instrs_list):
+            instr_index += len(instrs_list[_])
+            stack_snapshot.append(interpreter.get_stack_snapshot(instr_index))
+    except IndexError as error:
+        # Stack-polymorphic code after unreachable/throw cannot be modelled by
+        # the simple linear stack tracker. Leave that function intact.
+        raise UnsupportedStackType from error
 
     supported_stack_types = {ValTypeI32, ValTypeI64, ValTypeF32, ValTypeF64}
     if any(stack_type not in supported_stack_types

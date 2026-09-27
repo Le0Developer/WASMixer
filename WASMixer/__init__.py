@@ -214,22 +214,15 @@ class WASMixer:
 
     def name_obfuscation(self):
         """
-        Name obfuscation, obfuscate the readable strings in the import and export sections of wasm,
-        and obfuscate the readable strings in the debugging information in the custom section
+        Obfuscate internal names and custom-section labels without changing the
+        module's public import/export names. Those names are part of its host
+        linking contract and must remain stable for the module to keep working.
         Args:
 
         Returns:
 
         """
 
-        # import export
-        for item in self.wasm_binary.module.import_sec:
-            if item.module != 'wasi_snapshot_preview1':
-                item.module = ''.join(random.choices('zyxwvutsrqponmlkjihgfedcba', k=len(item.module)))
-                item.name = ''.join(random.choices('zyxwvutsrqponmlkjihgfedcba', k=len(item.name)))
-        for item in self.wasm_binary.module.export_sec:
-            if item.name != '_start' and item.desc.tag == 0:
-                item.name = ''.join(random.choices('zyxwvutsrqponmlkjihgfedcba', k=len(item.name)))
         # debug information
         for custom in self.wasm_binary.module.custom_secs:
             if custom.name == 'name':

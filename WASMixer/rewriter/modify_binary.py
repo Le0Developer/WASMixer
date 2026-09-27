@@ -354,11 +354,12 @@ class ModifyBinary:
                         print(instr.args)
                         print(func_id)
                         instr.args += 1
-                    elif instr.opcode == CallIndirect and instr.args >= type_id and is_new_functype is True:
+                    elif (instr.opcode == CallIndirect
+                          and instr.args.type_idx >= type_id and is_new_functype is True):
                         print("type=======")
-                        print(instr.args)
+                        print(instr.args.type_idx)
                         print(func_id)
-                        instr.args += 1
+                        instr.args.type_idx += 1
 
     def hook_call_from_expr(self, expr, func_id, new_func_id=None):
 
@@ -410,7 +411,10 @@ class ModifyBinary:
             start = section_range.start
             end = section_range.end
         else:
-            section_order = {SecDataCountID: 10, SecCodeID: 11, SecDataID: 12}
+            section_order = {
+                6: 7, 7: 8, 8: 9, 9: 10,
+                SecDataCountID: 11, SecCodeID: 12, SecDataID: 13, 13: 6,
+            }
             target_order = section_order.get(sec_id, sec_id)
             previous_sections = [
                 self.module.section_range[i]
@@ -617,6 +621,9 @@ class ModifyBinary:
         if file_path == None:
             file_path = self.module.path
 
+        if self.module.data_sec_opaque:
+            return
+
         data_vec_len = len(data_vec)
         data_vec_len_bytes = LEB128U.encode(data_vec_len)
         data_vec_bytes = bytes()
@@ -655,9 +662,14 @@ class ModifyBinary:
         if elem_vec == [] and self.module.raw_elem_entries is None:
             return
         for elem in elem_vec:
-            # Encode the active funcref form used by generated alias tables.
-            elem_vec_bytes += LEB128U.encode(elem.table)
+            # Use the compact MVP encoding for table 0 and the explicit
+            # active-segment encoding when targeting an added alias table.
+            elem_vec_bytes += LEB128U.encode(0 if elem.table == 0 else 2)
+            if elem.table != 0:
+                elem_vec_bytes += LEB128U.encode(elem.table)
             elem_vec_bytes += self.write_expr(elem.offset)
+            if elem.table != 0:
+                elem_vec_bytes += bytes([0x00])  # elemkind: funcref
             elem_vec_bytes += LEB128U.encode(len(elem.init))
             for func_idx in elem.init:
                 elem_vec_bytes += LEB128U.encode(func_idx)
@@ -759,6 +771,9 @@ class ModifyBinary:
         if file_path == None:
             file_path = self.module.path
 
+        if self.module.table_sec_opaque:
+            return
+
         table_vec_len = len(table_vec)
         table_vec_len_bytes = LEB128U.encode(table_vec_len)
         table_vec_bytes = bytes()
@@ -854,12 +869,12 @@ class ModifyBinary:
             return bytes([instr.args])
         elif opcode in [RefNull, RefFunc]:
             return LEB128U.encode(instr.args)
-        elif opcode in [MemoryInit, DataDrop, ElemDrop, TableGrow, TableSize, TableFill]:
-            return LEB128U.encode(instr.args)
-        elif opcode in [TableInit, TableCopy]:
+        elif opcode in [MemoryInit, MemoryCopy, TableInit, TableCopy]:
             x = LEB128U.encode(instr.args.x)
             y = LEB128U.encode(instr.args.y)
             return x + y
+        elif opcode in [DataDrop, ElemDrop, MemoryFill, TableGrow, TableSize, TableFill]:
+            return LEB128U.encode(instr.args)
         elif V128Load <= opcode <= V128Store or opcode in [V128Load32Zero, V128Load64Zero]:
             return self.write_mem_arg(instr)
         elif I32Load <= instr.opcode <= I64Store32:
@@ -905,8 +920,12 @@ class ModifyBinary:
     def write_call_indirect_args(instr):
 
         args_bytes = bytes()
-        args_bytes += LEB128U.encode(instr.args)
-        args_bytes += bytes([0x00])
+        if isinstance(instr.args, CallIndirectArgs):
+            args_bytes += LEB128U.encode(instr.args.type_idx)
+            args_bytes += LEB128U.encode(instr.args.table_idx)
+        else:
+            args_bytes += LEB128U.encode(instr.args)
+            args_bytes += bytes([0x00])
 
         return args_bytes
 

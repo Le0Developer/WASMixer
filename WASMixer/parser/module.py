@@ -30,6 +30,7 @@ SecCodeID = 10
 SecDataID = 11
 
 SecDataCountID = 12
+SecTagID = 13
 
 ImportTagFunc = 0
 ImportTagTable = 1
@@ -78,6 +79,8 @@ class Module:
         self.func_sec = []
 
         self.table_sec = []
+        self.table_sec_opaque = False
+        self.raw_table_section = None
 
         self.mem_sec = []
 
@@ -96,6 +99,9 @@ class Module:
         self.code_sec = []
 
         self.data_sec = []
+        self.data_sec_opaque = False
+        self.raw_data_section = None
+        self.raw_tag_section = None
 
         # The DataCount section is required by bulk-memory instructions and
         # appears before Code despite having section id 12.
@@ -103,7 +109,7 @@ class Module:
 
         self.section_range = []
         self.section_range.append([])
-        for i in range(12):
+        for i in range(13):
             self.section_range.append(SectionRange())
 
     def get_block_type(self, bt):
