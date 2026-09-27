@@ -71,6 +71,7 @@ def obfuscate_wasm(input_path: str, output_path: str, args: argparse.Namespace) 
     if not did_something:
         print("No obfuscation level selected. Use --list to see options.")
         sys.exit(1)
+    obfuscator.mutate_code(seed=args.seed)
     obfuscator.wasm_binary.emit_binary()
     print(f"Obfuscated binary saved as {output_path}.")
 
@@ -107,6 +108,7 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="List available obfuscation levels")
     parser.add_argument("--all", action="store_true", help="Apply all obfuscation levels")
     parser.add_argument("--safe", action="store_true", help="Do not overwrite original file; process a copy.")
+    parser.add_argument("--seed", type=int, help="Seed for final semantics-preserving code mutation.")
     args = parser.parse_args()
 
     if args.list:

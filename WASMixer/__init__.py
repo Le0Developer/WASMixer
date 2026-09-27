@@ -3,6 +3,7 @@ import random
 
 from WASMixer.obfuscator.core import CodeObfuscator
 from WASMixer.obfuscator.instruction_blocks import *
+from WASMixer.obfuscator.mutate import WasmMutator
 from WASMixer.rewriter.modify_binary import ModifyBinary
 
 sys.setrecursionlimit(10000)
@@ -211,6 +212,10 @@ class WASMixer:
 
         """
         self.code_obfuscator.memory_encrypten_obfuscation(key)
+
+    def mutate_code(self, seed=None):
+        """Apply seeded, semantics-preserving mutations to all function code."""
+        WasmMutator(seed=seed, preserve_semantics=True).mutate_module(self.wasm_binary.module)
 
     def name_obfuscation(self):
         """
