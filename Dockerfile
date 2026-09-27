@@ -15,7 +15,6 @@ RUN apk add --no-cache \
       cmake \
       curl \
       gdb \
-      gdbserver \
       git \
       gnupg \
       linux-headers \
@@ -24,12 +23,14 @@ RUN apk add --no-cache \
       python3 \
       python3-dev \
       py3-pip \
+      py3-virtualenv \
       rsync \
       shadow \
       sudo \
-      tar \
-    && python3 -m venv /opt/venv \
-    && python -m pip install --upgrade pip
+      tar
+
+RUN virtualenv --no-download /opt/venv \
+    && /opt/venv/bin/python3 -m pip install --upgrade pip
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
