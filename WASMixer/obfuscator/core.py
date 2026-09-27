@@ -330,24 +330,17 @@ class CodeObfuscator:
         self.wasm_binary.module.elem_sec.append(alias_elem)
         self.alias_elem = alias_elem
 
+        collatz_code_index = Collatz_func_id - self.wasm_binary.get_import_func_num()
         for i, func in enumerate(self.wasm_binary.module.code_sec):
-            func_type = self.wasm_binary.module.type_sec[self.wasm_binary.module.func_sec[i]]
-            param_type_list = func_type.param_types
-
-            if param_type_list != [] and i != (Collatz_func_id - self.wasm_binary.get_import_func_num()):
-
-                stack_length = get_function_memory_stack_length(self.wasm_binary, i)
-                expr = self.wasm_binary.module.code_sec[i].expr
-
-                self.call_to_indirect_call_collatz(expr, Collatz_func_id,
-                                                   param_type_list, stack_length)
+            if i != collatz_code_index:
+                self.call_to_indirect_call_collatz(func.expr, Collatz_func_id)
 
         self.wasm_binary.modify_table_section(self.wasm_binary.module.table_sec)
         self.wasm_binary.modify_import_section(self.wasm_binary.module.import_sec)
         self.wasm_binary.modify_elem_section(self.wasm_binary.module.elem_sec)
         self.wasm_binary.modify_code_section(self.wasm_binary.module.code_sec)
 
-    def call_to_indirect_call_collatz(self, expr, Collatz_func_id, param_type_list, stack_length):
+    def call_to_indirect_call_collatz(self, expr, Collatz_func_id):
         _ = 0
         while _ < len(expr):
             if expr[_].opcode == Call:
@@ -369,60 +362,26 @@ class CodeObfuscator:
                 expr[_] = Instruction(CallIndirect, func_type_id)
                 # Get the index of this function in funcref
                 funcref_id = self.alias_elem.init.index(func_id) + self.alias_elem.offset[0].args
-
-                jump_flag = funcref_id
-
-                Br_flag_Collatz_template = []
-
-                for param_id, param_type in enumerate(param_type_list):
-
-                    if param_type == 127:
-                        Br_flag_Collatz_template.extend([
-                            Instruction(LocalGet, param_id),
-                            Instruction(I32Const, random.randint(1, 1000)),
-                            Instruction(I32Mul)])
-                    elif param_type == 126:
-                        Br_flag_Collatz_template.extend([
-                            Instruction(LocalGet, param_id),
-                            Instruction(I64Const, random.randint(1, 1000)),
-                            Instruction(I64Mul),
-                            Instruction(I32WrapI64)])
-                    elif param_type == 125:
-                        Br_flag_Collatz_template.extend([
-                            Instruction(LocalGet, param_id),
-                            Instruction(F32Const, random.randint(1, 1000)),
-                            Instruction(F32Mul),
-                            Instruction(I32ReinterpretF32)])
-                    elif param_type == 124:
-                        Br_flag_Collatz_template.extend([
-                            Instruction(LocalGet, param_id),
-                            Instruction(F64Const, random.randint(1, 1000)),
-                            Instruction(F64Mul),
-                            Instruction(I64ReinterpretF64),
-                            Instruction(I32WrapI64)])
-                    if param_id != 0:
-                        Br_flag_Collatz_template.append(Instruction(I32Add))
-
-
-                Br_flag_Collatz_template.extend([
-                    Instruction(I32Const, random.randint(1050, 2000)),
+                # Keep the original call arguments on the stack, run the
+                # Collatz helper on a fixed terminating input, then supply
+                # the exact table index required by call_indirect.
+                decoy = [
+                    Instruction(I32Const, 32),
+                    Instruction(I32Const, 0),
                     Instruction(Call, Collatz_func_id),
-                    Instruction(I32Const, jump_flag - 1),
-                    Instruction(I32Add)
-                ])
-
-                Br_flag_Collatz_template[-2].args = jump_flag - 1
-
-                Br_flag_Collatz = copy.deepcopy(Br_flag_Collatz_template)
-                print(id(Br_flag_Collatz))
-                for i in reversed(Br_flag_Collatz):
-                    expr.insert(_, i)
-
-                _ += (len(Br_flag_Collatz_template) + 1)
+                    Instruction(Drop),
+                    Instruction(I32Const, funcref_id),
+                ]
+                for instruction in reversed(decoy):
+                    expr.insert(_, instruction)
+                _ += len(decoy) + 1
             # Recursive call
             elif expr[_].opcode in [Block, Loop]:
-                self.call_to_indirect_call_collatz(expr[_].args.instrs, Collatz_func_id,
-                                                   param_type_list, stack_length)
+                self.call_to_indirect_call_collatz(expr[_].args.instrs, Collatz_func_id)
+                _ += 1
+            elif expr[_].opcode == If:
+                self.call_to_indirect_call_collatz(expr[_].args.instrs1, Collatz_func_id)
+                self.call_to_indirect_call_collatz(expr[_].args.instrs2, Collatz_func_id)
                 _ += 1
             else:
                 _ += 1
