@@ -7,6 +7,10 @@ from WASMixer.parser.opcodes_stack import stack_change
 from WASMixer.rewriter.modify_binary import *
 from WASMixer.obfuscator.instruction_blocks import *
 
+
+class UnsupportedStackType(Exception):
+    pass
+
 def get_instrs_max_stack_depth(binary, instr_list):
     """
     获取指令序列使用的最大栈长度
@@ -118,6 +122,11 @@ def code_block_splitting(binary, instr_list, split_num, func_id):
         instr_index += len(instrs_list[_])
         stack_snapshot.append(interpreter.get_stack_snapshot(instr_index))
 
+    supported_stack_types = {ValTypeI32, ValTypeI64, ValTypeF32, ValTypeF64}
+    if any(stack_type not in supported_stack_types
+           for snapshot in stack_snapshot for stack_type in snapshot):
+        raise UnsupportedStackType
+
     # 构建每个基本块结构体
     basic_blocks = []
     for i in range(len(instrs_list)):
@@ -153,7 +162,7 @@ def code_block_splitting(binary, instr_list, split_num, func_id):
             elif stack_type == ValTypeF64:
                 instrs_pre.append(Instruction(LocalGet, new_local_f64[i]))
             else:
-                raise Exception("error")
+                raise UnsupportedStackType
 
         bb['instrs'] = instrs_pre + bb['instrs']
 
@@ -172,7 +181,7 @@ def code_block_splitting(binary, instr_list, split_num, func_id):
                 bb['instrs'].append(
                     Instruction(LocalSet, new_local_f64[len(bb['stack_snapshot_post']) - i - 1]))
             else:
-                raise Exception("error")
+                raise UnsupportedStackType
 
     return basic_blocks, new_local_i32, new_local_i64, new_local_f32, new_local_f64
 
@@ -185,8 +194,18 @@ def add_table_funcref_limits(binary, num):
     Returns:
 
     """
-    if not binary.module.table_sec:
-        binary.module.table_sec.append(TableType(limits=Limits(1, num + 1, num + 1)))
+    imported_tables = [item.desc.table for item in binary.module.import_sec
+                       if item.desc.table is not None]
+    if binary.module.table_sec:
+        table = binary.module.table_sec[0]
+    elif imported_tables:
+        table = imported_tables[0]
     else:
-        binary.module.table_sec[0].limits.min += num
-        binary.module.table_sec[0].limits.max += (num + 5)
+        binary.module.table_sec.append(TableType(elem_type=FuncRef, limits=Limits(0, num, 0)))
+        return 0
+
+    old_min = table.limits.min
+    table.limits.min += num
+    if table.limits.tag & 0x01:
+        table.limits.max += num
+    return old_min

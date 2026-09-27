@@ -66,7 +66,7 @@ def obfuscate_wasm(input_path: str, output_path: str, args: argparse.Namespace) 
         obfuscator.name_obfuscation()
         did_something = True
     if args.memory:
-        obfuscator.memory_obfuscation(key=0)
+        obfuscator.memory_obfuscation(key=None)
         did_something = True
     if not did_something:
         print("No obfuscation level selected. Use --list to see options.")

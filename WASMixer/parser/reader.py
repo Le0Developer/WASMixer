@@ -1,4 +1,5 @@
 import ctypes
+from io import BytesIO
 import struct
 
 from ..parser.instruction import Instruction, BlockArgs, IfArgs, BrTableArgs, MemArg, TableArg, MemLaneArg
@@ -11,7 +12,7 @@ from ..parser.module import Import, ImportDesc, ImportTagFunc, ImportTagTable, I
 from ..parser.opcodes import *
 from ..parser.opnames import opnames
 from ..parser.types import ValTypeI32, ValTypeI64, ValTypeF32, ValTypeF64, ValTypeV128, FuncType, FtTag, TableType, \
-    FuncRef, \
+    FuncRef, ExternRef, \
     GlobalType, MutConst, MutVar, Limits, BlockTypeI32, BlockTypeI64, BlockTypeF32, BlockTypeF64, BlockTypeEmpty, \
     NameAssoc, BlockTypeV128
 
@@ -189,7 +190,26 @@ class WasmReader:
 
             n, w = decode_var_uint(self.reader, 32)
             remaining_before_read = self.remaining()
-            self.read_non_custom_sec(sec_id, module, n, w)
+            section_start = self.reader.tell() - w - 1
+            section_end = self.reader.tell() + n
+            try:
+                self.read_non_custom_sec(sec_id, module, n, w)
+            except Exception:
+                if sec_id != SecElemID:
+                    raise
+                # Preserve unsupported reference-types element encodings.
+                # The current transforms append functions and do not renumber
+                # function references already stored in these segments.
+                module.elem_sec = []
+                module.elem_sec_opaque = True
+                module.raw_elem_section = self.data[section_start:section_end]
+                content_start = section_start + 1 + w
+                module.raw_elem_count, count_width = decode_var_uint_from_data(
+                    self.data[content_start:section_end], 32
+                )
+                entries_start = content_start + count_width
+                module.raw_elem_entries = self.data[entries_start:section_end]
+                self.reader.seek(section_end)
 
             remain = self.remaining()
             if remain + int(n) != remaining_before_read:
@@ -514,10 +534,25 @@ class WasmReader:
 
     def read_code(self, idx):
         n = self.read_var_u32()
-        remaining_before_read = self.remaining()
-        code = Code(self.read_locals_vec(), self.read_expr())
-        if self.remaining() + int(n) != remaining_before_read:
-            print("invalid code[%d]" % idx)
+        body = self.reader.read(n)
+        if len(body) != n:
+            raise ErrUnexpectedEnd
+        if any(prefix in body for prefix in (b"\xfd", b"\xfe", b"\xfb")):
+            # SIMD, threads, and GC use prefixed instruction sets with
+            # proposal-specific immediates. Preserve such bodies exactly;
+            # instruction-level transforms skip them safely.
+            return Code([], [], raw_body=body)
+        body_reader = WasmReader(body, BytesIO(body))
+        try:
+            locals_vec = body_reader.read_locals_vec()
+            expr = body_reader.read_expr()
+            if body_reader.remaining() != 0:
+                raise Exception("junk after function body")
+            code = Code(locals_vec, expr)
+        except Exception:
+            # Preserve proposal instructions the rewriter does not understand.
+            # Their function body can pass through section rewriting unchanged.
+            code = Code([], [], raw_body=body)
         if code.get_local_count() >= (1 << 32 - 1):
             raise Exception("too many locals: %d" % code.get_local_count())
         return code
@@ -549,7 +584,7 @@ class WasmReader:
 
     def read_val_type(self):
         vt = self.read_byte()
-        if vt not in [ValTypeI32, ValTypeI64, ValTypeF32, ValTypeF64, ValTypeV128]:
+        if vt not in [ValTypeI32, ValTypeI64, ValTypeF32, ValTypeF64, ValTypeV128, FuncRef, ExternRef]:
             raise Exception("malformed value type: %d" % vt)
         return vt
 
@@ -569,7 +604,7 @@ class WasmReader:
 
     def read_table_type(self):
         tt = TableType(self.read_byte(), self.read_limits())
-        if tt.elem_type != FuncRef:
+        if tt.elem_type not in [FuncRef, ExternRef]:
             raise Exception("invalid elemtype: %d" % tt.elem_type)
         return tt
 
@@ -582,7 +617,7 @@ class WasmReader:
 
     def read_limits(self):
         limits = Limits(self.read_byte(), self.read_var_u32())
-        if limits.tag == 1:
+        if limits.tag & 0x01:
             limits.max = self.read_var_u32()
         return limits
 

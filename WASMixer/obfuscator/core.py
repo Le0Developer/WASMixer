@@ -40,7 +40,12 @@ class CodeObfuscator:
 
         jump_flag_local = self.wasm_binary.add_new_local_to_func(func_id, ValTypeI32)
 
-        code_blocks, new_local_i32, new_local_i64, new_local_f32, new_local_f64 = code_block_splitting(self.wasm_binary, instr_list, split_num, func_id)
+        try:
+            code_blocks, new_local_i32, new_local_i64, new_local_f32, new_local_f64 = code_block_splitting(
+                self.wasm_binary, instr_list, split_num, func_id
+            )
+        except UnsupportedStackType:
+            return instr_list
 
         basic_blocks = []
         for cb in code_blocks:
@@ -260,35 +265,26 @@ class CodeObfuscator:
             return final_instrs
 
     def alias_disruption(self):
+        # An imported table belongs to the embedding. Rewriting its minimum
+        # or replacing entries would change the host-side table contract.
+        if any(item.desc.table is not None for item in self.wasm_binary.module.import_sec):
+            return
 
-        # Get the list of function ids called indirectly before obfuscation
-        origin_funcref_list = []
-        for elem in self.wasm_binary.module.elem_sec:
-            origin_funcref_list.extend(elem.init)
-
-        # Remove function ids that have been called indirectly from all function id lists
-        rest_func_id_list = list(
-            range(0, (self.wasm_binary.get_import_func_num() + len(self.wasm_binary.module.func_sec))))
-        for i in range(len(rest_func_id_list)):
-            if i in origin_funcref_list:
-                rest_func_id_list.remove(i)
-
-        # Adjust the limits of funcref elem in the table element
-        add_table_funcref_limits(self.wasm_binary, len(rest_func_id_list))
-
-        # Disrupt the list of function ids that are not indirectly called
-        random.shuffle(rest_func_id_list)
-        # Add a list of function ids that are not indirectly called in the elem segment
-        if not self.wasm_binary.module.elem_sec:
-            self.wasm_binary.module.elem_sec.append(Elem(0, [Instruction(I32Const, 1)], rest_func_id_list))
-        else:
-            self.wasm_binary.module.elem_sec[0].init.extend(rest_func_id_list)
+        func_ids = list(range(
+            self.wasm_binary.get_import_func_num() + len(self.wasm_binary.module.func_sec)
+        ))
+        table_base = add_table_funcref_limits(self.wasm_binary, len(func_ids))
+        random.shuffle(func_ids)
+        alias_elem = Elem(0, [Instruction(I32Const, table_base)], func_ids)
+        self.wasm_binary.module.elem_sec.append(alias_elem)
+        self.alias_elem = alias_elem
 
         for _, func in enumerate(self.wasm_binary.module.code_sec):
             self.call_to_indirect_call(func.expr)
 
         # Modify the table segment, elem segment and code segment
         self.wasm_binary.modify_table_section(self.wasm_binary.module.table_sec)
+        self.wasm_binary.modify_import_section(self.wasm_binary.module.import_sec)
         self.wasm_binary.modify_elem_section(self.wasm_binary.module.elem_sec)
         self.wasm_binary.modify_code_section(self.wasm_binary.module.code_sec)
 
@@ -313,8 +309,7 @@ class CodeObfuscator:
                 # Build call_indirect instruction
                 expr[_] = Instruction(CallIndirect, func_type_id)
                 # Get the index of this function in funcref
-                funcref_id = self.wasm_binary.module.elem_sec[0].init.index(func_id) + \
-                             self.wasm_binary.module.elem_sec[0].offset[0].args
+                funcref_id = self.alias_elem.init.index(func_id) + self.alias_elem.offset[0].args
                 # Push the funcref index on the stack
                 expr.insert(_, Instruction(I32Const, funcref_id))
 
@@ -323,45 +318,34 @@ class CodeObfuscator:
                 self.call_to_indirect_call(instr.args.instrs)
 
     def alias_disruption_collatz(self, Collatz_func_id):
+        if any(item.desc.table is not None for item in self.wasm_binary.module.import_sec):
+            return
 
-        # Get the list of function ids called indirectly before obfuscation
-        origin_funcref_list = []
-        for elem in self.wasm_binary.module.elem_sec:
-            origin_funcref_list.extend(elem.init)
+        func_ids = list(range(
+            self.wasm_binary.get_import_func_num() + len(self.wasm_binary.module.func_sec)
+        ))
+        table_base = add_table_funcref_limits(self.wasm_binary, len(func_ids))
+        random.shuffle(func_ids)
+        alias_elem = Elem(0, [Instruction(I32Const, table_base)], func_ids)
+        self.wasm_binary.module.elem_sec.append(alias_elem)
+        self.alias_elem = alias_elem
 
-        # Remove function ids that have been called indirectly from all function id lists
-        rest_func_id_list = list(
-            range(0, (self.wasm_binary.get_import_func_num() + len(self.wasm_binary.module.func_sec))))
-        for i in range(len(rest_func_id_list)):
-            if i in origin_funcref_list:
-                rest_func_id_list.remove(i)
+        for i, func in enumerate(self.wasm_binary.module.code_sec):
+            func_type = self.wasm_binary.module.type_sec[self.wasm_binary.module.func_sec[i]]
+            param_type_list = func_type.param_types
 
-            # Adjust the limits of funcref elem in the table
-            add_table_funcref_limits(self.wasm_binary, len(rest_func_id_list))
+            if param_type_list != [] and i != (Collatz_func_id - self.wasm_binary.get_import_func_num()):
 
-            # Disrupt the list of function ids that are not indirectly called
-            random.shuffle(rest_func_id_list)
-            # Add a list of function ids that are not indirectly called in the elem segment
-            if not self.wasm_binary.module.elem_sec:
-                self.wasm_binary.module.elem_sec.append(Elem(0, [Instruction(I32Const, 1)], rest_func_id_list))
-            else:
-                self.wasm_binary.module.elem_sec[0].init.extend(rest_func_id_list)
+                stack_length = get_function_memory_stack_length(self.wasm_binary, i)
+                expr = self.wasm_binary.module.code_sec[i].expr
 
-            for i, func in enumerate(self.wasm_binary.module.code_sec):
-                func_type = self.wasm_binary.module.type_sec[self.wasm_binary.module.func_sec[i]]
-                param_type_list = func_type.param_types
+                self.call_to_indirect_call_collatz(expr, Collatz_func_id,
+                                                   param_type_list, stack_length)
 
-                if param_type_list != [] and i != (Collatz_func_id - self.wasm_binary.get_import_func_num()):
-
-                    stack_length = get_function_memory_stack_length(self.wasm_binary, i)
-                    expr = self.wasm_binary.module.code_sec[i].expr
-
-                    self.call_to_indirect_call_collatz(expr, Collatz_func_id,
-                                                       param_type_list, stack_length)
-
-            self.wasm_binary.modify_table_section(self.wasm_binary.module.table_sec)
-            self.wasm_binary.modify_elem_section(self.wasm_binary.module.elem_sec)
-            self.wasm_binary.modify_code_section(self.wasm_binary.module.code_sec)
+        self.wasm_binary.modify_table_section(self.wasm_binary.module.table_sec)
+        self.wasm_binary.modify_import_section(self.wasm_binary.module.import_sec)
+        self.wasm_binary.modify_elem_section(self.wasm_binary.module.elem_sec)
+        self.wasm_binary.modify_code_section(self.wasm_binary.module.code_sec)
 
     def call_to_indirect_call_collatz(self, expr, Collatz_func_id, param_type_list, stack_length):
         _ = 0
@@ -384,8 +368,7 @@ class CodeObfuscator:
                 # Build call_indirect instruction
                 expr[_] = Instruction(CallIndirect, func_type_id)
                 # Get the index of this function in funcref
-                funcref_id = self.wasm_binary.module.elem_sec[0].init.index(func_id) + \
-                             self.wasm_binary.module.elem_sec[0].offset[0].args
+                funcref_id = self.alias_elem.init.index(func_id) + self.alias_elem.offset[0].args
 
                 jump_flag = funcref_id
 
@@ -452,51 +435,60 @@ class CodeObfuscator:
         if key is None:
             key = random.randint(1, 128)
 
-        global_key = bytes([key, key, key, key])
-        global_key = int.from_bytes(global_key, byteorder='little')
-        global_key_id = self.wasm_binary.append_global_variable(ValTypeI64, global_key)
-        self.wasm_binary.modify_global_section(self.wasm_binary.module.global_sec)
-
-        decrypten_load_funcbody = get_decrypten_load()
-        decrypten_load_funcbody[4].args.instrs[3].args = global_key_id
-
-        encrypten_store_funcbody = get_encrypten_store()
-        encrypten_store_funcbody[4].args.instrs[2].args = global_key_id
-
-        # encrypten memory data
+        segments = []
         for data in self.wasm_binary.module.data_sec:
-            memory_data = data.init
+            if data.mem != 0 or len(data.offset) != 1 or data.offset[0].opcode != I32Const:
+                raise ValueError("memory obfuscation supports active data segments in memory 0")
             start = data.offset[0].args
-            end = start + len(data.init) - 1
-            instrs = compare_range_instrs(start, end)
-            encrypten_store_funcbody[4].args.instrs[0].args.instrs = instrs + encrypten_store_funcbody[4].args.instrs[
-                0].args.instrs
-            decrypten_load_funcbody[4].args.instrs[0].args.instrs = instrs + decrypten_load_funcbody[4].args.instrs[
-                0].args.instrs
-            for _, byte in enumerate(memory_data):
-                memory_data[_] = key ^ memory_data[_]
-        self.wasm_binary.modify_data_section(self.wasm_binary.module.data_sec)
+            if start < 0 or start + len(data.init) > 0x7FFFFFFF:
+                raise ValueError("data segment address is outside the supported memory range")
+            segments.append((start, data.init))
 
-        decrypten_load_functype = FuncType(param_types=[ValTypeI32, ValTypeI32, ValTypeI32, ValTypeI32],
-                                           result_types=[ValTypeI64])
-        decrypten_load_locals = Locals(1, ValTypeI64)
-        decrypten_load_funcid = self.wasm_binary.add_function(decrypten_load_functype,
-                                                              [decrypten_load_locals],
-                                                              decrypten_load_funcbody)
+        # Encrypt each active data segment in the file. A tiny start function
+        # decrypts it after data initialization and before the module's own
+        # start function, leaving normal loads and stores untouched at runtime.
+        for _, memory_data in segments:
+            for index, byte in enumerate(memory_data):
+                memory_data[index] = byte ^ key
 
-        encrypten_store_functype = FuncType(param_types=[ValTypeI32, ValTypeI64, ValTypeI32, ValTypeI32],
-                                            result_types=[])
-        encrypten_store_funcid = self.wasm_binary.add_function(encrypten_store_functype, [],
-                                                               encrypten_store_funcbody)
+        decrypt_expr = []
+        for start, memory_data in segments:
+            end = start + len(memory_data)
+            decrypt_expr.extend([
+                Instruction(I32Const, start),
+                Instruction(LocalSet, 0),
+                Instruction(Block, BlockArgs(BlockTypeEmpty, [
+                    Instruction(Loop, BlockArgs(BlockTypeEmpty, [
+                        Instruction(LocalGet, 0),
+                        Instruction(I32Const, end),
+                        Instruction(I32GeU),
+                        Instruction(BrIf, 1),
+                        Instruction(LocalGet, 0),
+                        Instruction(LocalGet, 0),
+                        Instruction(I32Load8U, MemArg()),
+                        Instruction(I32Const, key),
+                        Instruction(I32Xor),
+                        Instruction(I32Store8, MemArg()),
+                        Instruction(LocalGet, 0),
+                        Instruction(I32Const, 1),
+                        Instruction(I32Add),
+                        Instruction(LocalSet, 0),
+                        Instruction(Br, 0),
+                    ])),
+                ])),
+            ])
 
-        if encrypten_store_funcid <= decrypten_load_funcid:
-            decrypten_load_funcid += 1
+        if self.wasm_binary.module.start_sec is not None:
+            decrypt_expr.append(Instruction(Call, self.wasm_binary.module.start_sec))
 
-        for _, code in enumerate(self.wasm_binary.module.code_sec):
-            import_func_num = self.wasm_binary.get_import_func_num()
-            if _ not in [decrypten_load_funcid - import_func_num, encrypten_store_funcid - import_func_num]:
-                self.hook_load_store_instr(code.expr, decrypten_load_funcid, encrypten_store_funcid)
-
+        decrypt_type = FuncType(param_types=[], result_types=[])
+        decrypt_func_id = self.wasm_binary.add_function(
+            decrypt_type,
+            [Locals(1, ValTypeI32)],
+            decrypt_expr,
+        )
+        self.wasm_binary.module.start_sec = decrypt_func_id
+        self.wasm_binary.modify_start_section(decrypt_func_id)
         self.wasm_binary.emit_binary()
 
     def hook_load_store_instr(self, instrs, decrypten_load_funcid, encrypten_store_funcid):

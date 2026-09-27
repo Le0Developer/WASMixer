@@ -88,6 +88,10 @@ class Module:
         self.start_sec = None
 
         self.elem_sec = []
+        self.elem_sec_opaque = False
+        self.raw_elem_section = None
+        self.raw_elem_entries = None
+        self.raw_elem_count = 0
 
         self.code_sec = []
 
@@ -229,11 +233,12 @@ class Elem:
 
 class Code:
 
-    def __init__(self, locals_vec=None, expr=None):
+    def __init__(self, locals_vec=None, expr=None, raw_body=None):
         if locals_vec is None:
             locals_vec = []
         self.locals = locals_vec
         self.expr = expr
+        self.raw_body = raw_body
 
     def get_local_count(self) -> int:
         n = 0
