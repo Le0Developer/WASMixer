@@ -10,7 +10,6 @@ setup(
     install_requires=[
         "setuptools==68.0.0",
         "sphinx-tabs==3.4.1",
-        "BREWasm==1.0.8",
         "numpy>=1.25.2"
     ],
     python_requires='>=3.9',

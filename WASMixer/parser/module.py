@@ -29,6 +29,8 @@ SecCodeID = 10
 
 SecDataID = 11
 
+SecDataCountID = 12
+
 ImportTagFunc = 0
 ImportTagTable = 1
 ImportTagMem = 2

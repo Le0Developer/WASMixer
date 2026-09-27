@@ -1,7 +1,6 @@
 import os
 import struct
 
-from BREWasm.parser.module import SecDataCountID
 from WASMixer.leb128 import LEB128U, LEB128S
 from WASMixer.parser import reader
 from WASMixer.parser.instruction import *
