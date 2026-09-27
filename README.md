@@ -1,6 +1,6 @@
 # WASMixer
 
-WASMixer consists of two main functions: the data obfuscator and the code obfuscator. The data obfuscator randomizes readable names and encrypts/decrypts memory areas at runtime. The code obfuscator manipulates instructions and control flow through techniques like alias disruption, control flow flattening, and Collatz-based opaque predicates to thwart human reverse engineering and static analysis.
+WASMixer consists of two main functions: the data obfuscator and the code obfuscator. The data obfuscator randomizes readable names and encrypts/decrypts memory areas at runtime. The code obfuscator manipulates instructions and control flow through techniques like alias disruption, control flow flattening, and Collatz-based opaque predicates. Flattened functions also contain a runtime-dependent guard around dead arithmetic code; its parity predicate is always false for 32-bit values.
 
 ## Getting Started
 

@@ -1,4 +1,5 @@
 from WASMixer.obfuscator.utils import *
+from WASMixer.parser.instruction import IfArgs
 from WASMixer.parser.types import FuncRef, FuncType, Limits, TableType
 from typing import Optional, Union, Any
 
@@ -227,6 +228,33 @@ class CodeObfuscator:
             if cb['id'] == 0:
                 out_block.args.instrs.append(Instruction(I32Const, _))
                 out_block.args.instrs.append(Instruction(LocalSet, jump_flag_local))
+
+        # Add a dead branch guarded by an opaque parity predicate. For every
+        # 32-bit value x, x * (x + 1) is even, including when arithmetic wraps,
+        # so the branch body cannot run. Its runtime-dependent condition is
+        # harder to discard by simple constant folding than an immediate 0.
+        out_block.args.instrs.extend([
+            Instruction(LocalGet, jump_flag_local),
+            Instruction(LocalGet, jump_flag_local),
+            Instruction(I32Const, 1),
+            Instruction(I32Add),
+            Instruction(I32Mul),
+            Instruction(I32Const, 1),
+            Instruction(I32And),
+            Instruction(I32Const, 1),
+            Instruction(I32Eq),
+        ])
+        bogus_body = [
+            Instruction(I32Const, random.randint(-1000000, 1000000)),
+            Instruction(I32Const, random.randint(-1000000, 1000000)),
+            Instruction(I32Mul),
+            Instruction(I32Const, random.randint(-1000000, 1000000)),
+            Instruction(I32Add),
+            Instruction(Drop),
+        ]
+        out_block.args.instrs.append(
+            Instruction(If, IfArgs(BlockTypeEmpty, bogus_body))
+        )
         out_block.args.instrs.append(loop_block)
 
         # Add operands at the end to maintain stack balance
