@@ -6,7 +6,8 @@ from ..parser.leb128 import *
 from ..parser.module import Import, ImportDesc, ImportTagFunc, ImportTagTable, ImportTagMem, ImportTagGlobal, \
     Global, Export, ExportDesc, ExportTagFunc, ExportTagTable, ExportTagMem, ExportTagGlobal, Elem, Code, Locals, \
     Data, MagicNumber, Version, Module, SecCustomID, SecDataID, CustomSec, SecTypeID, SecImportID, SecFuncID, \
-    SecTableID, SecMemID, SecGlobalID, SecExportID, SecStartID, SecElemID, SecCodeID, NameData, SectionRange
+    SecTableID, SecMemID, SecGlobalID, SecExportID, SecStartID, SecElemID, SecCodeID, SecDataCountID, \
+    NameData, SectionRange
 from ..parser.opcodes import *
 from ..parser.opnames import opnames
 from ..parser.types import ValTypeI32, ValTypeI64, ValTypeF32, ValTypeF64, ValTypeV128, FuncType, FtTag, TableType, \
@@ -157,7 +158,7 @@ class WasmReader:
 
     def read_sections(self, module: Module):
 
-        prev_sec_id = 0
+        prev_sec_rank = 0
         while self.remaining() > 0:
             sec_id = self.read_byte()
 
@@ -176,12 +177,15 @@ class WasmReader:
                     module.custom_secs.append(CustomSec())
                     continue
 
-            if sec_id > SecDataID:
+            if sec_id not in range(SecTypeID, SecDataID + 1) and sec_id != SecDataCountID:
                 raise Exception("malformed section id: %d" % sec_id)
 
-            if sec_id <= prev_sec_id and sec_id != SecCustomID:
+            # DataCount (id 12) is ordered between Element (id 9) and Code
+            # (id 10), so numeric section ids are not their binary order.
+            sec_rank = {SecDataCountID: 10, SecCodeID: 11, SecDataID: 12}.get(sec_id, sec_id)
+            if sec_rank <= prev_sec_rank:
                 raise Exception("malformed section id: %d" % sec_id)
-            prev_sec_id = sec_id
+            prev_sec_rank = sec_rank
 
             n, w = decode_var_uint(self.reader, 32)
             remaining_before_read = self.remaining()
@@ -396,6 +400,10 @@ class WasmReader:
             print("code end=" + str(module.section_range[SecCodeID].end))
 
             module.code_sec = self.read_code_sec()
+        elif sec_id == SecDataCountID:
+            module.section_range[SecDataCountID].start = self.reader.tell() - byte_count_size - 1
+            module.section_range[SecDataCountID].end = self.reader.tell() + sec_size
+            module.data_count = self.read_var_u32()
         elif sec_id == SecDataID:
             module.section_range[SecDataID].start = self.reader.tell() - byte_count_size - 1
             module.section_range[SecDataID].end = self.reader.tell() + sec_size

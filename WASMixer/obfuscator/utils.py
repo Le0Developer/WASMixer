@@ -42,7 +42,10 @@ def get_instrs_max_stack_depth(binary, instr_list):
             current_stack += (len(binary.module.type_sec[instr.args].result_types) -
                               len(binary.module.type_sec[instr.args].param_types)) - 1
         else:
-            # 这里可能因为遇到了没收录的指令而报越界
+            # Proposals can introduce opcodes outside the legacy stack table.
+            # Keep those functions valid by leaving them unflattened.
+            if instr.opcode >= len(stack_change) or stack_change[instr.opcode] == -100:
+                return -1
             current_stack += stack_change[instr.opcode]
 
         if current_stack > max_stack:
@@ -81,7 +84,7 @@ def code_block_splitting(binary, instr_list, split_num, func_id):
 
     # 如果遇到了无法识别的指令，就直接不平坦化了
     if max_stack == -1:
-        return instr_list
+        return instr_list, [], [], [], []
 
     # 添加用于维持栈平衡和跳转标志的local，+1那个就是跳转标志的local
     new_local_i32 = []

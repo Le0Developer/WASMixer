@@ -9,15 +9,20 @@ from WASMixer.parser.opcodes import *
 from WASMixer.parser.types import *
 
 
+def _encode_name(name):
+    encoded = name.encode("utf-8")
+    return LEB128U.encode(len(encoded)) + encoded
+
+
 class ModifyBinary:
 
     def __init__(self, path: str, module=None):
         if module is None:
             module, err = reader.decode_file(path)
             if err is not None:
-                print(err.args)
+                print(err)
                 print("=================================")
-                raise Exception("Failed to read the wasm file!  " + err.args)
+                raise Exception("Failed to read the wasm file!  " + str(err)) from err
 
             self.module = module
             self.module.path = path
@@ -36,10 +41,10 @@ class ModifyBinary:
     def emit_binary(self):
         file_path = self.module.path
 
-        with open(file_path, "wb+") as f:
+        mode = "r+b" if os.path.isfile(file_path) else "wb+"
+        with open(file_path, mode) as f:
             magic_version_number = struct.pack("II", self.module.magic, self.module.version)
             f.write(magic_version_number)
-            f.close()
 
         self.modify_custom_name_section(self.module.custom_secs, file_path)
         self.modify_type_section(self.module.type_sec, file_path)
@@ -380,28 +385,49 @@ class ModifyBinary:
         self.modify_import_section(self.module.import_sec)
 
     def fix_section_range(self, sec_id, change, start, custom_sec_id=None):
+        # Shift ranges by their byte position. Section ids do not reliably
+        # express binary order: DataCount has id 12 but precedes Code (10).
+        for i, section_range in enumerate(self.module.section_range[1:], start=1):
+            if i != sec_id and section_range.start != section_range.end and start <= section_range.start:
+                section_range.start += change
+                section_range.end += change
 
-        if sec_id != SecCustomID:
-            for i in range(sec_id + 1, 12):
-                if self.module.section_range[i].start != self.module.section_range[i].end:
-                    self.module.section_range[i].start += change
-                    self.module.section_range[i].end += change
+        for i, custom in enumerate(self.module.section_range[SecCustomID]):
+            if i != custom_sec_id and start <= custom.start:
+                custom.start += change
+                custom.end += change
 
-            if self.module.section_range[0] != []:
-                for custom in self.module.section_range[0]:
-                    if start <= custom.start:
-                        custom.start += change
-                        custom.end += change
-        elif sec_id == SecCustomID:
-            for i in range(1, 12):
-                if self.module.section_range[i].start != self.module.section_range[i].end and start <= \
-                        self.module.section_range[i].start:
-                    self.module.section_range[i].start += change
-                    self.module.section_range[i].end += change
-            for _, custom in enumerate(self.module.section_range[0]):
-                if _ != custom_sec_id and start <= custom.start:
-                    custom.start += change
-                    custom.end += change
+    def write_standard_section(self, sec_id, section_bytes, file_path):
+        section_range = self.module.section_range[sec_id]
+        if os.path.isfile(file_path):
+            f = open(file_path, "r+b")
+        else:
+            f = open(file_path, "w+b")
+        file_bytes = f.read()
+
+        old_size = section_range.end - section_range.start
+        if old_size:
+            start = section_range.start
+            end = section_range.end
+        else:
+            previous_sections = [
+                self.module.section_range[i]
+                for i in range(1, sec_id)
+                if self.module.section_range[i].start != self.module.section_range[i].end
+            ]
+            start = previous_sections[-1].end if previous_sections else 8
+            end = start
+
+        file_new_bytes = file_bytes[:start] + section_bytes + file_bytes[end:]
+        change = len(section_bytes) - old_size
+        section_range.start = start
+        section_range.end = start + len(section_bytes)
+        self.fix_section_range(sec_id, change, start)
+        f.seek(0)
+        f.truncate()
+        f.write(file_new_bytes)
+        f.close()
+        return section_bytes
 
     def modify_custom_name_section(self, custom_vec: list, file_path=None):
         if file_path == None:
@@ -410,8 +436,7 @@ class ModifyBinary:
         for _, custom in enumerate(custom_vec):
             if custom.name == "name":
                 name_section_bytes = bytes()
-                name_section_bytes += LEB128U.encode(len(custom.name))
-                name_section_bytes += bytes(custom.name, encoding="utf-8")
+                name_section_bytes += _encode_name(custom.name)
                 if custom.name_data.moduleNameSubSec != None:
                     name_section_bytes += bytes([0x00])
                     name_section_bytes += LEB128U.encode(len(custom.name_data.moduleNameSubSec))
@@ -422,8 +447,7 @@ class ModifyBinary:
                     funcname_bytes += LEB128U.encode(len(custom.name_data.funcNameSubSec))
                     for funcname in custom.name_data.funcNameSubSec:
                         funcname_bytes += LEB128U.encode(funcname.idx)
-                        funcname_bytes += LEB128U.encode(len(funcname.name))
-                        funcname_bytes += bytes(funcname.name, encoding="utf-8")
+                        funcname_bytes += _encode_name(funcname.name)
                     name_section_bytes += (bytes([0x01]) + LEB128U.encode(len(funcname_bytes))) + funcname_bytes
 
                 if custom.name_data.localNameSubSec != None:
@@ -443,8 +467,7 @@ class ModifyBinary:
                     tablename_bytes += LEB128U.encode(len(custom.name_data.tableNameSubSec))
                     for tablename in custom.name_data.tableNameSubSec:
                         tablename_bytes += LEB128U.encode(tablename.idx)
-                        tablename_bytes += LEB128U.encode(len(tablename.name))
-                        tablename_bytes += bytes(tablename.name, encoding="utf-8")
+                        tablename_bytes += _encode_name(tablename.name)
                     name_section_bytes += (bytes([0x05]) + LEB128U.encode(len(tablename_bytes))) + tablename_bytes
                 if custom.name_data.memoryNameSubSec != None:
                     name_section_bytes += bytes([0x06])
@@ -455,8 +478,7 @@ class ModifyBinary:
                     globalname_bytes += LEB128U.encode(len(custom.name_data.globalNameSubSec))
                     for globalname in custom.name_data.globalNameSubSec:
                         globalname_bytes += LEB128U.encode(globalname.idx)
-                        globalname_bytes += LEB128U.encode(len(globalname.name))
-                        globalname_bytes += bytes(globalname.name, encoding="utf-8")
+                        globalname_bytes += _encode_name(globalname.name)
                     name_section_bytes += (bytes([0x07]) + LEB128U.encode(len(globalname_bytes))) + globalname_bytes
                 if custom.name_data.elemNameSubSec != None:
                     name_section_bytes += bytes([0x08])
@@ -467,8 +489,7 @@ class ModifyBinary:
                     dataname_bytes += LEB128U.encode(len(custom.name_data.dataNameSubSec))
                     for dataname in custom.name_data.dataNameSubSec:
                         dataname_bytes += LEB128U.encode(dataname.idx)
-                        dataname_bytes += LEB128U.encode(len(dataname.name))
-                        dataname_bytes += bytes(dataname.name, encoding="utf-8")
+                        dataname_bytes += _encode_name(dataname.name)
                     name_section_bytes += (bytes([0x09]) + LEB128U.encode(len(dataname_bytes))) + dataname_bytes
 
                 if os.path.isfile(file_path):
@@ -491,8 +512,7 @@ class ModifyBinary:
                 f.close()
             else:
                 custom_section_bytes = bytes()
-                custom_section_bytes += LEB128U.encode(len(custom.name))
-                custom_section_bytes += bytes(custom.name, encoding="utf-8")
+                custom_section_bytes += _encode_name(custom.name)
                 custom_section_bytes += custom.custom_sec_data
 
                 if os.path.isfile(file_path):
@@ -527,10 +547,8 @@ class ModifyBinary:
         if import_vec == []:
             return
         for i in import_vec:
-            import_vec_bytes += LEB128U.encode(len(i.module))
-            import_vec_bytes += bytes(i.module, encoding="utf-8")
-            import_vec_bytes += LEB128U.encode(len(i.name))
-            import_vec_bytes += bytes(i.name, encoding="utf-8")
+            import_vec_bytes += _encode_name(i.module)
+            import_vec_bytes += _encode_name(i.name)
             import_vec_bytes += LEB128U.encode(i.desc.tag)
             if i.desc.func_type is not None:
                 import_vec_bytes += LEB128U.encode(i.desc.func_type)
@@ -575,8 +593,7 @@ class ModifyBinary:
         if export_vec == []:
             return
         for export_item in export_vec:
-            export_vec_bytes += LEB128U.encode(len(export_item.name))
-            export_vec_bytes += bytes(export_item.name, encoding="utf-8")
+            export_vec_bytes += _encode_name(export_item.name)
             export_vec_bytes += LEB128U.encode(export_item.desc.tag)
             export_vec_bytes += LEB128U.encode(export_item.desc.idx)
 
@@ -762,46 +779,7 @@ class ModifyBinary:
                 elem_vec_bytes += LEB128U.encode(func_idx)
         elem_section_bytes = bytes([SecElemID]) + LEB128U.encode(len(elem_vec_bytes)) + elem_vec_bytes
 
-        if os.path.isfile(file_path):
-            f = open(file_path, "r+b")
-        else:
-            f = open(file_path, "w+b")
-        file_bytes = f.read()
-        binary_start = self.module.section_range[SecElemID].start
-        binary_end = self.module.section_range[SecElemID].end
-        if binary_start == binary_end:
-            for i in reversed(range(SecElemID)):
-                if self.module.section_range[i].start != self.module.section_range[i].end:
-                    file_new_bytes = file_bytes[
-                                     :self.module.section_range[i].end] + elem_section_bytes + file_bytes[
-                                                                                               self.module.section_range[
-                                                                                                   i].end:]
-                    change = len(elem_section_bytes) - (
-                            self.module.section_range[SecElemID].end - self.module.section_range[SecElemID].start)
-                    self.module.section_range[SecElemID].start = self.module.section_range[i].end
-                    self.module.section_range[SecElemID].end = self.module.section_range[i].end + len(
-                        elem_section_bytes)
-                    self.fix_section_range(SecElemID, change, self.module.section_range[SecElemID].start)
-                    f.seek(0)
-                    f.truncate()
-                    f.write(file_new_bytes)
-                    break
-        else:
-            file_new_bytes = file_bytes[
-                             :self.module.section_range[SecElemID].start] + elem_section_bytes + file_bytes[
-                                                                                                 self.module.section_range[
-                                                                                                     SecElemID].end:]
-            change = len(elem_section_bytes) - (
-                    self.module.section_range[SecElemID].end - self.module.section_range[SecElemID].start)
-
-            self.module.section_range[SecElemID].end = self.module.section_range[SecElemID].start + len(
-                elem_section_bytes)
-            self.fix_section_range(SecElemID, change, self.module.section_range[SecElemID].start)
-            f.seek(0)
-            f.truncate()
-            f.write(file_new_bytes)
-        f.close()
-        return elem_section_bytes
+        return self.write_standard_section(SecElemID, elem_section_bytes, file_path)
 
     def modify_type_section(self, functype_vec: list, file_path=None):
         if file_path == None:
@@ -988,48 +966,7 @@ class ModifyBinary:
 
         table_section_bytes = bytes([0x04]) + LEB128U.encode(len(table_vec_bytes)) + table_vec_bytes
 
-        if os.path.isfile(file_path):
-            f = open(file_path, "r+b")
-        else:
-            f = open(file_path, "w+b")
-        file_bytes = f.read()
-        binary_start = self.module.section_range[SecTableID].start
-        binary_end = self.module.section_range[SecTableID].end
-        if binary_start == binary_end:
-            for i in reversed(range(SecTableID)):
-                if self.module.section_range[i].start != self.module.section_range[i].end:
-                    file_new_bytes = file_bytes[
-                                     :self.module.section_range[i].end] + table_section_bytes + file_bytes[
-                                                                                                self.module.section_range[
-                                                                                                    i].end:]
-                    change = len(table_section_bytes) - (
-                            self.module.section_range[SecTableID].end - self.module.section_range[
-                        SecTableID].start)
-                    self.module.section_range[SecTableID].start = self.module.section_range[i].end
-                    self.module.section_range[SecTableID].end = self.module.section_range[i].end + len(
-                        table_section_bytes)
-                    self.fix_section_range(SecTableID, change, self.module.section_range[SecTableID].start)
-                    f.seek(0)
-                    f.truncate()
-                    f.write(file_new_bytes)
-                    break
-        else:
-            file_new_bytes = file_bytes[
-                             :self.module.section_range[SecTableID].start] + table_section_bytes + file_bytes[
-                                                                                                   self.module.section_range[
-                                                                                                       SecTableID].end:]
-            change = len(table_section_bytes) - (
-                    self.module.section_range[SecTableID].end - self.module.section_range[SecTableID].start)
-
-            self.module.section_range[SecTableID].end = self.module.section_range[SecTableID].start + len(
-                table_section_bytes)
-            self.fix_section_range(SecTableID, change, self.module.section_range[SecTableID].start)
-            f.seek(0)
-            f.truncate()
-            f.write(file_new_bytes)
-        f.close()
-
-        return table_section_bytes
+        return self.write_standard_section(SecTableID, table_section_bytes, file_path)
 
     def write_expr(self, expr: list):
 

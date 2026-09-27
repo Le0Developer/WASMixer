@@ -28,6 +28,12 @@ class CodeObfuscator:
 
     def instr_flatten(self, instr_list, split_num, block_type, func_id, Collatz_func_id=None):
 
+        # Some proposal instructions do not have a stack model in
+        # opcodes_stack.py. Keep such functions intact instead of flattening
+        # them with an incomplete stack snapshot.
+        if get_instrs_max_stack_depth(self.wasm_binary, instr_list) == -1:
+            return instr_list
+
         return_exist = False
         if instr_list[len(instr_list) - 1].opcode == Return:
             return_exist = True

@@ -93,9 +93,13 @@ class Module:
 
         self.data_sec = []
 
+        # The DataCount section is required by bulk-memory instructions and
+        # appears before Code despite having section id 12.
+        self.data_count = None
+
         self.section_range = []
         self.section_range.append([])
-        for i in range(11):
+        for i in range(12):
             self.section_range.append(SectionRange())
 
     def get_block_type(self, bt):
