@@ -46,6 +46,10 @@ jobs:
         working-directory: assemblyscript
         run: npm ci
 
+      - name: Build AssemblyScript distribution
+        working-directory: assemblyscript
+        run: npm run build
+
       - name: Run AssemblyScript tests with WASMixer
         working-directory: assemblyscript
         env:
